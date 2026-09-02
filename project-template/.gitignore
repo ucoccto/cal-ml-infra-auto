@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Local settings
+.env
+
+# 학습 산출물: 대용량 파일은 Git 대신 S3에 저장한다.
+checkpoints/*
+!checkpoints/.gitkeep
+outputs/*
+!outputs/.gitkeep
+logs/*
+!logs/.gitkeep
+
+# 다운로드한 학습 데이터
+# 실제 source of truth는 S3로 유지한다.
+data/*
+!data/.gitkeep

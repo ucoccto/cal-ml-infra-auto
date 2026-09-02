@@ -1,0 +1,14 @@
+# Terraform local state / provider cache
+.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.lock.hcl
+
+# 실제 계정/이메일/IP 등 로컬 변수는 Git에 올리지 않는다.
+terraform.tfvars
+*.auto.tfvars
+
+# OS / Editor
+.DS_Store
+.vscode/
+.idea/

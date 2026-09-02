@@ -1,0 +1,45 @@
+# ------------------------------
+# 기본 환경
+# ------------------------------
+aws_region        = "ap-northeast-2"
+availability_zone = "ap-northeast-2a"
+project_name      = "cal-ml"
+environment       = "dev"
+
+# ------------------------------
+# GPU / Storage
+# ------------------------------
+# 기본 추천: NVIDIA L4 24GB GPU 1개 / 8 vCPU / RAM 32GiB
+instance_type = "g6.2xlarge"
+
+# Root: OS/도구, Data: 코드/Notebook/checkpoint
+root_volume_size = 100
+data_volume_size = 300
+
+# gp3 기본 성능값. 처음에는 높일 필요가 없다.
+data_volume_iops       = 3000
+data_volume_throughput = 125
+
+# ------------------------------
+# 개발환경 자동 구성
+# ------------------------------
+jupyter_port        = 8888
+install_ml_packages = true
+
+# ------------------------------
+# 접속
+# ------------------------------
+# 기본은 SSM Session Manager 사용. SSH는 닫아둔다.
+enable_ssh = false
+
+# SSH가 꼭 필요할 때만 아래를 활성화한다.
+# enable_ssh       = true
+# key_name         = "your-existing-keypair"
+# ssh_allowed_cidr = "203.0.113.10/32"
+
+# ------------------------------
+# 비용 알림(선택)
+# ------------------------------
+# 이메일을 넣으면 AWS Budget을 생성한다.
+# budget_email      = "student@example.com"
+# monthly_budget_usd = 250

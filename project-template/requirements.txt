@@ -1,0 +1,31 @@
+# CAL 프로젝트의 기본 Python 개발환경이다.
+# 실제 모델이 확정되면 팀에서 테스트한 버전으로 고정(pin)하는 것을 권장한다.
+
+# Notebook / 개발
+jupyterlab
+ipykernel
+ipywidgets
+
+# 수치/데이터 처리
+numpy
+scipy
+pandas
+matplotlib
+scikit-learn
+
+# 이미지/3D/과학 계산
+Pillow
+scikit-image
+trimesh
+h5py
+
+# ML / GPU
+# pip wheel은 CUDA runtime 의존성을 함께 가져오므로 DLAMI의 NVIDIA driver 위에서 동작한다.
+torch
+torchvision
+
+# 실험/유틸리티
+tensorboard
+tqdm
+PyYAML
+boto3
