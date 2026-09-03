@@ -170,7 +170,7 @@ Default Region
 이 프로젝트의 기본 Region:
 
 ```text
-ap-northeast-2
+ap-northeast-3
 ```
 
 즉 **서울 Region**입니다.
@@ -193,7 +193,7 @@ aws configure
 ```text
 AWS Access Key ID [None]: <본인의 Access Key>
 AWS Secret Access Key [None]: <본인의 Secret Access Key>
-Default region name [None]: ap-northeast-2
+Default region name [None]: ap-northeast-3
 Default output format [None]: json
 ```
 
@@ -218,7 +218,7 @@ aws configure list
 profile      <not set>
 access_key   ****************XXXX
 secret_key   ****************XXXX
-region       ap-northeast-2
+region       ap-northeast-3
 ```
 
 ---
@@ -430,7 +430,7 @@ session-manager-plugin --version
 [ ] terraform version 정상
 [ ] aws --version 정상
 [ ] aws sts get-caller-identity 정상
-[ ] Region = ap-northeast-2
+[ ] Region = ap-northeast-3
 [ ] session-manager-plugin --version 정상
 ```
 
@@ -504,7 +504,7 @@ infra\terraform.tfvars
 예:
 
 ```hcl
-aws_region    = "ap-northeast-2"
+aws_region    = "ap-northeast-3"
 environment   = "dev"
 instance_type = "g6.2xlarge"
 ```
@@ -1248,7 +1248,7 @@ EC2 Start:
 ```powershell
 aws ec2 start-instances `
   --instance-ids $INSTANCE_ID `
-  --region ap-northeast-2
+  --region ap-northeast-3
 ```
 
 상태 확인:
@@ -1256,7 +1256,7 @@ aws ec2 start-instances `
 ```powershell
 aws ec2 describe-instances `
   --instance-ids $INSTANCE_ID `
-  --region ap-northeast-2 `
+  --region ap-northeast-3 `
   --query "Reservations[0].Instances[0].State.Name" `
   --output text
 ```
@@ -1409,7 +1409,7 @@ $INSTANCE_ID = terraform -chdir=infra output -raw instance_id
 
 aws ec2 stop-instances `
   --instance-ids $INSTANCE_ID `
-  --region ap-northeast-2
+  --region ap-northeast-3
 ```
 
 AWS Console에서도:
@@ -1615,7 +1615,7 @@ ss -lntp | grep 8888
 
 ```powershell
 aws ssm describe-instance-information `
-  --region ap-northeast-2 `
+  --region ap-northeast-3 `
   --query "InstanceInformationList[?InstanceId=='$(terraform -chdir=infra output -raw instance_id)'].[InstanceId,PingStatus,AgentVersion]" `
   --output table
 ```
@@ -1740,7 +1740,7 @@ EC2 확인:
 
 ```powershell
 aws ec2 describe-instances `
-  --region ap-northeast-2 `
+  --region ap-northeast-3 `
   --filters "Name=tag:Project,Values=cal-ml"
 ```
 
@@ -1754,7 +1754,7 @@ EBS 확인:
 
 ```powershell
 aws ec2 describe-volumes `
-  --region ap-northeast-2
+  --region ap-northeast-3
 ```
 
 필요한 경우 AWS Console에서도 다음을 최종 확인합니다.

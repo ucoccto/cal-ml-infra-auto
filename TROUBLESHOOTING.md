@@ -22,7 +22,7 @@ terraform -chdir=infra output -raw instance_id
 ```powershell
 aws ec2 describe-instances `
   --instance-ids <INSTANCE_ID> `
-  --region ap-northeast-2 `
+  --region ap-northeast-3 `
   --query "Reservations[0].Instances[0].[State.Name,IamInstanceProfile.Arn]" `
   --output table
 ```
@@ -37,7 +37,7 @@ SSM:
 
 ```powershell
 aws ssm describe-instance-information `
-  --region ap-northeast-2 `
+  --region ap-northeast-3 `
   --query "InstanceInformationList[?InstanceId=='<INSTANCE_ID>'].[InstanceId,PingStatus,AgentVersion]" `
   --output table
 ```
@@ -77,7 +77,7 @@ AWS 실제:
 ```powershell
 aws ec2 describe-iam-instance-profile-associations `
   --filters "Name=instance-id,Values=<INSTANCE_ID>" `
-  --region ap-northeast-2
+  --region ap-northeast-3
 ```
 
 **terminated 인스턴스에는 Instance Profile을 다시 연결할 수 없습니다.**
@@ -98,7 +98,7 @@ terraform -chdir=infra output -raw bootstrap_association_id
 ```powershell
 aws ssm describe-association `
   --association-id <ASSOCIATION_ID> `
-  --region ap-northeast-2
+  --region ap-northeast-3
 ```
 
 EC2에 SSM 접속이 된다면 전체 bootstrap 로그:
@@ -123,7 +123,7 @@ AWS attachment 확인:
 ```powershell
 aws ec2 describe-volumes `
   --volume-ids $(terraform -chdir=infra output -raw data_ebs_volume_id) `
-  --region ap-northeast-2
+  --region ap-northeast-3
 ```
 
 EC2 내부:

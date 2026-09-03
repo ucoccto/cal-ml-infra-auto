@@ -1,10 +1,11 @@
 # ------------------------------
 # 공통 설정
 # ------------------------------
+# 오사카 리전 사용
 variable "aws_region" {
   description = "AWS 리전"
   type        = string
-  default     = "ap-northeast-2"
+  default     = "ap-northeast-3"
 }
 
 variable "availability_zone" {

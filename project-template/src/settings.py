@@ -10,7 +10,7 @@ from pathlib import Path
 PROJECT_DIR = Path(os.getenv("CAL_PROJECT_DIR", "/workspace/cal-project"))
 CACHE_DIR = Path(os.getenv("CAL_CACHE_DIR", "/workspace/cache"))
 S3_BUCKET = os.getenv("CAL_S3_BUCKET", "")
-AWS_REGION = os.getenv("CAL_AWS_REGION", "ap-northeast-2")
+AWS_REGION = os.getenv("CAL_AWS_REGION", "ap-northeast-3")
 
 CHECKPOINT_DIR = PROJECT_DIR / "checkpoints"
 OUTPUT_DIR = PROJECT_DIR / "outputs"
