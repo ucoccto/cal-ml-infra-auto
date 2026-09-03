@@ -1,5 +1,6 @@
-# AWS가 공개한 SSM Public Parameter에서 최신 Ubuntu 24.04 GPU DLAMI의 AMI ID를 조회한다.
-# 특정 AMI ID를 코드에 하드코딩하지 않으므로 새 DLAMI 릴리스에도 대응하기 쉽다.
+# AWS가 공개한 SSM Public Parameter에서 최신 Ubuntu 24.04 GPU DLAMI AMI ID를 조회한다.
+# 최초 생성 시 최신 AMI를 사용하되, 이후 AWS가 latest 값을 갱신했다고 해서
+# 기존 학습 서버를 의도치 않게 교체하지 않도록 lifecycle에서 ami 변경은 무시한다.
 data "aws_ssm_parameter" "dlami_gpu" {
   name = "/aws/service/deeplearning/ami/x86_64/base-oss-nvidia-driver-gpu-ubuntu-24.04/latest/ami-id"
 }
@@ -10,16 +11,20 @@ resource "aws_instance" "ml" {
 
   subnet_id              = aws_subnet.public.id
   vpc_security_group_ids = [aws_security_group.ml.id]
-  iam_instance_profile   = aws_iam_instance_profile.ml_ec2.name
+
+  # SSM/S3 권한이 포함된 Instance Profile을 EC2 시작 시점부터 연결한다.
+  iam_instance_profile = aws_iam_instance_profile.ml_ec2.name
 
   # SSH가 비활성화된 기본 구성에서는 Key Pair가 필요하지 않다.
   key_name = var.enable_ssh ? var.key_name : null
 
-  # NAT Gateway 비용을 쓰지 않고 패키지 다운로드/SSM 접속을 하기 위해 Public IP를 사용한다.
-  # 보안그룹 Inbound는 기본 0개이므로 인터넷에서 Jupyter/SSH로 직접 접근할 수 없다.
+  # NAT Gateway 비용 없이 인터넷/SSM/S3/Python package endpoint에 접근한다.
+  # Security Group inbound는 기본 0개라 Public IP가 있어도 외부에서 직접 접근할 수 없다.
   associate_public_ip_address = true
 
-  # OS/시스템 패키지용 Root EBS다.
+  # OS에서 shutdown 명령이 실행되더라도 terminate가 아니라 stop 되도록 명시한다.
+  instance_initiated_shutdown_behavior = "stop"
+
   root_block_device {
     volume_type           = "gp3"
     volume_size           = var.root_volume_size
@@ -37,22 +42,16 @@ resource "aws_instance" "ml" {
     http_tokens   = "required"
   }
 
-  # EC2 최초 부팅에서 개발환경까지 자동 구성한다.
-  # - Data EBS /workspace 마운트
-  # - 프로젝트 Template S3 다운로드
-  # - Python venv + requirements 설치
-  # - JupyterLab systemd 서비스 생성
-  # - GPU/환경 점검
-  user_data = templatefile("${path.module}/templates/user_data.sh.tftpl", {
-    project_name        = var.project_name
-    s3_bucket           = aws_s3_bucket.data.bucket
-    data_volume_id      = aws_ebs_volume.data.id
-    jupyter_port        = var.jupyter_port
-    install_ml_packages = var.install_ml_packages
-    aws_region          = var.aws_region
-  })
+  # user_data에서는 SSM Agent만 최대한 빨리 Online으로 만든다.
+  # EBS mount / Python / Jupyter는 bootstrap.tf의 SSM Association이 담당한다.
+  user_data                   = file(local.user_data_template)
+  user_data_replace_on_change = false
 
   lifecycle {
+    # AWS의 latest DLAMI Public Parameter가 갱신되어도 기존 EC2를 자동 교체하지 않는다.
+    # EC2가 실제로 사라져 재생성될 때는 현재 latest AMI가 사용된다.
+    ignore_changes = [ami]
+
     precondition {
       condition     = !var.enable_ssh || var.key_name != null
       error_message = "enable_ssh=true이면 key_name에 기존 EC2 Key Pair 이름을 지정해야 합니다."
@@ -64,14 +63,15 @@ resource "aws_instance" "ml" {
     }
   }
 
-  # EC2 생성 전에 Bootstrap 프로젝트 파일을 S3에 업로드해야 한다.
+  # EC2가 뜨기 전에 IAM 권한과 Public Route가 준비되도록 생성 순서를 명시한다.
   depends_on = [
-    aws_s3_object.project_template,
+    aws_route_table_association.public,
     aws_iam_role_policy_attachment.s3_access,
     aws_iam_role_policy_attachment.ssm
   ]
 
   tags = {
-    Name = "${var.project_name}-${var.environment}-gpu"
+    Name            = "${var.project_name}-${var.environment}-gpu"
+    BootstrapTarget = local.bootstrap_target
   }
 }

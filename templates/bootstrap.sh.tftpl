@@ -1,0 +1,394 @@
+#!/bin/bash
+# ============================================================================
+# CAL ML Full Bootstrap
+# Terraform aws_ssm_association.bootstrap -> AWS-RunShellScript 로 실행된다.
+# 실패/진행 로그: /var/log/cal-bootstrap.log
+# 성공 마커: /workspace/bootstrap-success
+# ============================================================================
+set -Eeuo pipefail
+
+exec > >(tee -a /var/log/cal-bootstrap.log) 2>&1
+trap 'echo "ERROR: bootstrap failed at line $LINENO ($(date -Is))"' ERR
+
+echo "===== CAL ML bootstrap start: $(date -Is) ====="
+
+PROJECT_NAME="${project_name}"
+S3_BUCKET="${s3_bucket}"
+AWS_REGION="${aws_region}"
+DATA_VOLUME_ID="${data_volume_id}"
+JUPYTER_PORT="${jupyter_port}"
+INSTALL_ML_PACKAGES="${install_ml_packages}"
+
+APP_USER="ubuntu"
+WORKSPACE="/workspace"
+PROJECT_DIR="$WORKSPACE/cal-project"
+VENV_DIR="$WORKSPACE/venv"
+SUCCESS_MARKER="$WORKSPACE/bootstrap-success"
+
+rm -f "$SUCCESS_MARKER"
+
+if ! id "$APP_USER" >/dev/null 2>&1; then
+  echo "ERROR: 예상 Ubuntu 사용자($APP_USER)가 없습니다. AMI를 확인하세요."
+  exit 1
+fi
+
+# ----------------------------------------------------------------------------
+# 1. 기본 시스템 도구
+# ----------------------------------------------------------------------------
+export DEBIAN_FRONTEND=noninteractive
+
+# cloud-init/unattended-upgrade가 apt lock을 잡는 짧은 구간을 피한다.
+for attempt in $(seq 1 60); do
+  if ! fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 && \
+     ! fuser /var/lib/dpkg/lock >/dev/null 2>&1; then
+    break
+  fi
+  echo "APT lock 대기 중... ($attempt/60)"
+  sleep 5
+done
+
+apt-get update -y
+apt-get install -y \
+  python3-venv python3-pip python3-dev build-essential \
+  git curl wget unzip jq htop tmux nvme-cli \
+  ca-certificates
+
+# DLAMI에는 AWS CLI가 일반적으로 포함되지만, 없으면 AWS CLI v2를 설치한다.
+if ! command -v aws >/dev/null 2>&1; then
+  echo "AWS CLI를 설치합니다."
+  ARCH=$(uname -m)
+  case "$ARCH" in
+    x86_64) AWSCLI_ARCH="x86_64" ;;
+    aarch64|arm64) AWSCLI_ARCH="aarch64" ;;
+    *) echo "ERROR: 지원하지 않는 CPU architecture: $ARCH"; exit 1 ;;
+  esac
+
+  rm -rf /tmp/aws /tmp/awscliv2.zip
+  curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-$AWSCLI_ARCH.zip" -o /tmp/awscliv2.zip
+  unzip -q /tmp/awscliv2.zip -d /tmp
+  /tmp/aws/install
+fi
+
+aws --version
+
+# ----------------------------------------------------------------------------
+# 2. SSM Agent 상태 재확인
+# ----------------------------------------------------------------------------
+if systemctl list-unit-files 2>/dev/null | grep -q '^amazon-ssm-agent.service'; then
+  systemctl enable --now amazon-ssm-agent.service || true
+elif command -v snap >/dev/null 2>&1 && snap list amazon-ssm-agent >/dev/null 2>&1; then
+  snap start amazon-ssm-agent || true
+fi
+
+# ----------------------------------------------------------------------------
+# 3. Data EBS -> /workspace
+# ----------------------------------------------------------------------------
+# Nitro 인스턴스에서는 Terraform의 /dev/sdf가 Linux 내부에서 NVMe로 보인다.
+# EBS Volume ID의 serial(vol- -> vol)을 이용해 실제 장치를 찾는다.
+DATA_SERIAL=$(echo "$DATA_VOLUME_ID" | tr -d '-')
+DATA_DEVICE=""
+
+for attempt in $(seq 1 180); do
+  DATA_DEVICE=$(lsblk -ndo NAME,SERIAL 2>/dev/null | awk -v serial="$DATA_SERIAL" '$2 == serial {print "/dev/"$1; exit}')
+
+  if [ -n "$DATA_DEVICE" ] && [ -b "$DATA_DEVICE" ]; then
+    break
+  fi
+
+  echo "Data EBS attach/device 대기 중... ($attempt/180) volume=$DATA_VOLUME_ID"
+  sleep 5
+done
+
+if [ -z "$DATA_DEVICE" ] || [ ! -b "$DATA_DEVICE" ]; then
+  echo "ERROR: Data EBS 장치를 찾지 못했습니다: $DATA_VOLUME_ID"
+  lsblk -o NAME,SIZE,FSTYPE,MODEL,SERIAL,MOUNTPOINTS || true
+  exit 1
+fi
+
+echo "Data EBS device: $DATA_DEVICE"
+
+# 새 EBS에만 ext4를 만든다. 기존 데이터 볼륨은 절대 재포맷하지 않는다.
+if ! blkid "$DATA_DEVICE" >/dev/null 2>&1; then
+  echo "새 Data EBS: ext4 파일시스템 생성"
+  mkfs.ext4 -F "$DATA_DEVICE"
+fi
+
+mkdir -p "$WORKSPACE"
+DATA_UUID=$(blkid -s UUID -o value "$DATA_DEVICE")
+
+if [ -z "$DATA_UUID" ]; then
+  echo "ERROR: Data EBS UUID 조회 실패"
+  exit 1
+fi
+
+if ! grep -q "UUID=$DATA_UUID " /etc/fstab; then
+  echo "UUID=$DATA_UUID $WORKSPACE ext4 defaults,nofail 0 2" >> /etc/fstab
+fi
+
+if ! mountpoint -q "$WORKSPACE"; then
+  mount "$WORKSPACE" || mount -a
+fi
+
+if ! mountpoint -q "$WORKSPACE"; then
+  echo "ERROR: $WORKSPACE mount 실패"
+  exit 1
+fi
+
+chown "$APP_USER:$APP_USER" "$WORKSPACE"
+
+echo "Mounted Data EBS:"
+findmnt "$WORKSPACE"
+
+# ----------------------------------------------------------------------------
+# 4. G6 Local NVMe -> cache
+# ----------------------------------------------------------------------------
+# AWS DLAMI의 NVMe mount 위치. g6.2xlarge는 Local NVMe를 제공한다.
+# Local NVMe는 Stop/Terminate 시 보존 대상으로 간주하지 않는다.
+LOCAL_NVME="/opt/dlami/nvme"
+CACHE_TARGET="$WORKSPACE/cache"
+
+if systemctl list-unit-files 2>/dev/null | grep -q '^dlami-nvme.service'; then
+  systemctl enable --now dlami-nvme.service || true
+fi
+
+for attempt in $(seq 1 24); do
+  if [ -d "$LOCAL_NVME" ] && mountpoint -q "$LOCAL_NVME"; then
+    break
+  fi
+  sleep 5
+done
+
+if [ -d "$LOCAL_NVME" ] && mountpoint -q "$LOCAL_NVME"; then
+  NVME_CACHE="$LOCAL_NVME/$PROJECT_NAME-cache"
+  mkdir -p "$NVME_CACHE"
+  chown -R "$APP_USER:$APP_USER" "$NVME_CACHE"
+
+  if [ -L "$CACHE_TARGET" ]; then
+    rm -f "$CACHE_TARGET"
+  elif [ -e "$CACHE_TARGET" ]; then
+    rm -rf "$CACHE_TARGET"
+  fi
+
+  ln -s "$NVME_CACHE" "$CACHE_TARGET"
+  echo "Local NVMe cache: $CACHE_TARGET -> $NVME_CACHE"
+else
+  # 다른 인스턴스 타입에서도 동작할 수 있도록 EBS fallback
+  if [ -L "$CACHE_TARGET" ]; then
+    rm -f "$CACHE_TARGET"
+  fi
+  mkdir -p "$CACHE_TARGET"
+  chown -R "$APP_USER:$APP_USER" "$CACHE_TARGET"
+  echo "Local NVMe 미탐지: EBS $CACHE_TARGET 을 cache로 사용"
+fi
+
+# ----------------------------------------------------------------------------
+# 5. S3 Project Template -> EBS
+# ----------------------------------------------------------------------------
+mkdir -p "$PROJECT_DIR"
+chown "$APP_USER:$APP_USER" "$PROJECT_DIR"
+
+SYNC_OK=false
+for attempt in $(seq 1 18); do
+  if aws s3 sync \
+      "s3://$S3_BUCKET/bootstrap/project-template/" \
+      "$PROJECT_DIR/" \
+      --region "$AWS_REGION"; then
+    SYNC_OK=true
+    break
+  fi
+
+  echo "Project template S3 sync 재시도... ($attempt/18)"
+  sleep 10
+done
+
+if [ "$SYNC_OK" != "true" ]; then
+  echo "ERROR: S3 project-template 다운로드 실패"
+  exit 1
+fi
+
+# 잘못된 Terraform 경로로 파일이 하나도 업로드되지 않는 문제를 즉시 잡는다.
+if [ ! -f "$PROJECT_DIR/requirements.txt" ] || [ ! -f "$PROJECT_DIR/scripts/gpu_check.py" ]; then
+  echo "ERROR: project-template 필수 파일이 없습니다."
+  echo "S3 prefix: s3://$S3_BUCKET/bootstrap/project-template/"
+  find "$PROJECT_DIR" -maxdepth 3 -type f -print || true
+  exit 1
+fi
+
+mkdir -p \
+  "$PROJECT_DIR/checkpoints" \
+  "$PROJECT_DIR/outputs" \
+  "$PROJECT_DIR/logs" \
+  "$PROJECT_DIR/data"
+
+chown -R "$APP_USER:$APP_USER" "$PROJECT_DIR"
+
+# data/cache만 Local NVMe 또는 EBS cache 경로를 바라본다.
+rm -rf "$PROJECT_DIR/data/cache"
+ln -s "$CACHE_TARGET" "$PROJECT_DIR/data/cache"
+chown -h "$APP_USER:$APP_USER" "$PROJECT_DIR/data/cache"
+
+# ----------------------------------------------------------------------------
+# 6. Python venv + ML/Jupyter packages
+# ----------------------------------------------------------------------------
+if [ ! -x "$VENV_DIR/bin/python" ]; then
+  rm -rf "$VENV_DIR"
+  sudo -u "$APP_USER" python3 -m venv "$VENV_DIR"
+fi
+
+sudo -u "$APP_USER" "$VENV_DIR/bin/python" -m pip install --upgrade pip setuptools wheel
+
+pip_install_with_retry() {
+  for attempt in $(seq 1 3); do
+    if sudo -u "$APP_USER" "$VENV_DIR/bin/pip" install --prefer-binary "$@"; then
+      return 0
+    fi
+    echo "pip install 재시도... ($attempt/3)"
+    sleep 15
+  done
+  return 1
+}
+
+if [ "$INSTALL_ML_PACKAGES" = "true" ]; then
+  echo "Python/ML 패키지 설치 시작"
+  pip_install_with_retry -r "$PROJECT_DIR/requirements.txt"
+else
+  echo "경량 Jupyter 환경만 설치"
+  pip_install_with_retry jupyterlab ipykernel boto3
+fi
+
+# ----------------------------------------------------------------------------
+# 7. 공통 환경변수
+# ----------------------------------------------------------------------------
+cat > /etc/profile.d/cal-project.sh <<EOF_ENV
+export CAL_PROJECT_DIR="$PROJECT_DIR"
+export CAL_S3_BUCKET="$S3_BUCKET"
+export CAL_AWS_REGION="$AWS_REGION"
+export CAL_CACHE_DIR="$CACHE_TARGET"
+export PATH="$VENV_DIR/bin:\$PATH"
+EOF_ENV
+chmod 0644 /etc/profile.d/cal-project.sh
+
+sudo -u "$APP_USER" "$VENV_DIR/bin/python" -m ipykernel install \
+  --user \
+  --name cal-ml \
+  --display-name "CAL ML (Python)"
+
+# ----------------------------------------------------------------------------
+# 8. JupyterLab systemd service
+# ----------------------------------------------------------------------------
+JUPYTER_CONFIG_DIR="$WORKSPACE/.jupyter"
+mkdir -p "$JUPYTER_CONFIG_DIR"
+chown -R "$APP_USER:$APP_USER" "$JUPYTER_CONFIG_DIR"
+
+cat > "$JUPYTER_CONFIG_DIR/jupyter_server_config.py" <<EOF_JUPYTER
+c.ServerApp.ip = "127.0.0.1"
+c.ServerApp.port = $JUPYTER_PORT
+c.ServerApp.open_browser = False
+c.ServerApp.root_dir = "$PROJECT_DIR"
+c.ServerApp.allow_remote_access = False
+# 인증/접근 제어는 AWS SSM Session Manager 계층이 담당하고,
+# Jupyter 자체는 EC2 loopback에서만 listen한다.
+c.IdentityProvider.token = ""
+EOF_JUPYTER
+chown "$APP_USER:$APP_USER" "$JUPYTER_CONFIG_DIR/jupyter_server_config.py"
+
+cat > /etc/systemd/system/cal-jupyter.service <<EOF_SERVICE
+[Unit]
+Description=CAL ML JupyterLab
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=$WORKSPACE
+
+[Service]
+Type=simple
+User=$APP_USER
+Group=$APP_USER
+WorkingDirectory=$PROJECT_DIR
+Environment=HOME=/home/$APP_USER
+Environment=CAL_PROJECT_DIR=$PROJECT_DIR
+Environment=CAL_S3_BUCKET=$S3_BUCKET
+Environment=CAL_AWS_REGION=$AWS_REGION
+Environment=CAL_CACHE_DIR=$CACHE_TARGET
+ExecStart=$VENV_DIR/bin/jupyter lab --config=$JUPYTER_CONFIG_DIR/jupyter_server_config.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF_SERVICE
+
+systemctl daemon-reload
+systemctl enable cal-jupyter.service
+systemctl restart cal-jupyter.service
+
+# Jupyter가 실제 listen 상태가 될 때까지 확인한다.
+for attempt in $(seq 1 60); do
+  if systemctl is-active --quiet cal-jupyter.service && \
+     ss -lnt 2>/dev/null | grep -q ":$JUPYTER_PORT "; then
+    break
+  fi
+  echo "Jupyter 시작 대기 중... ($attempt/60)"
+  sleep 2
+done
+
+if ! systemctl is-active --quiet cal-jupyter.service; then
+  echo "ERROR: cal-jupyter.service가 active가 아닙니다."
+  journalctl -u cal-jupyter.service -n 200 --no-pager || true
+  exit 1
+fi
+
+# ----------------------------------------------------------------------------
+# 9. GPU / Python / S3 Smoke Test
+# ----------------------------------------------------------------------------
+# GPU DLAMI + GPU instance가 맞는지 확실히 실패로 판정한다.
+nvidia-smi
+
+# S3 권한 확인
+aws s3 ls "s3://$S3_BUCKET/" --region "$AWS_REGION" >/dev/null
+
+# Python 기본 점검
+sudo -u "$APP_USER" "$VENV_DIR/bin/python" "$PROJECT_DIR/scripts/gpu_check.py"
+
+# 전체 ML package 설치를 선택한 경우 CUDA 연산까지 성공해야 bootstrap 성공으로 본다.
+if [ "$INSTALL_ML_PACKAGES" = "true" ]; then
+  sudo -u "$APP_USER" bash -lc "cd '$PROJECT_DIR' && '$VENV_DIR/bin/python' scripts/smoke_train.py"
+fi
+
+# ----------------------------------------------------------------------------
+# 10. 최종 상태 기록
+# ----------------------------------------------------------------------------
+{
+  echo "===== BOOTSTRAP RESULT ====="
+  echo "completed_at=$(date -Is)"
+  echo "project=$PROJECT_NAME"
+  echo "bucket=$S3_BUCKET"
+  echo "region=$AWS_REGION"
+  echo "data_volume=$DATA_VOLUME_ID"
+  echo
+  echo "===== SYSTEM ====="
+  uname -a
+  echo
+  echo "===== NVIDIA ====="
+  nvidia-smi
+  echo
+  echo "===== STORAGE ====="
+  lsblk -o NAME,SIZE,FSTYPE,MODEL,SERIAL,MOUNTPOINTS
+  df -h
+  echo
+  echo "===== PYTHON ====="
+  "$VENV_DIR/bin/python" --version
+  "$VENV_DIR/bin/python" "$PROJECT_DIR/scripts/gpu_check.py"
+  echo
+  echo "===== JUPYTER ====="
+  systemctl --no-pager --full status cal-jupyter.service
+} > "$WORKSPACE/bootstrap-status.txt" 2>&1
+
+chown "$APP_USER:$APP_USER" "$WORKSPACE/bootstrap-status.txt"
+
+date -Is > "$SUCCESS_MARKER"
+chown "$APP_USER:$APP_USER" "$SUCCESS_MARKER"
+
+echo "===== CAL ML bootstrap complete: $(date -Is) ====="
+echo "Status: $WORKSPACE/bootstrap-status.txt"
+echo "Success marker: $SUCCESS_MARKER"
+echo "Jupyter: 127.0.0.1:$JUPYTER_PORT (SSM Port Forwarding 전용)"

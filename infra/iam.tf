@@ -1,4 +1,4 @@
-# EC2가 사용할 IAM Role의 Trust Policy다.
+# EC2가 사용할 IAM Role Trust Policy
 data "aws_iam_policy_document" "ec2_assume_role" {
   statement {
     effect = "Allow"
@@ -17,13 +17,13 @@ resource "aws_iam_role" "ml_ec2" {
   assume_role_policy = data.aws_iam_policy_document.ec2_assume_role.json
 }
 
-# SSH 포트를 열지 않고 AWS Systems Manager(Session Manager)로 접속하기 위한 관리형 정책이다.
+# Session Manager / State Manager 통신에 필요한 AWS 관리형 정책
 resource "aws_iam_role_policy_attachment" "ssm" {
   role       = aws_iam_role.ml_ec2.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+  policy_arn = "arn:${data.aws_partition.current.partition}:iam::aws:policy/AmazonSSMManagedInstanceCore"
 }
 
-# 프로젝트 Bucket에 대해서만 읽기/쓰기 권한을 부여한다.
+# 프로젝트 전용 S3 Bucket에 대해서만 읽기/쓰기 권한을 준다.
 data "aws_iam_policy_document" "s3_access" {
   statement {
     sid    = "ListProjectBucket"
@@ -59,7 +59,7 @@ resource "aws_iam_role_policy_attachment" "s3_access" {
   policy_arn = aws_iam_policy.s3_access.arn
 }
 
-# IAM Role을 EC2에 연결하기 위한 Instance Profile이다.
+# EC2 시작 시 IAM Role을 전달하는 Instance Profile
 resource "aws_iam_instance_profile" "ml_ec2" {
   name = "${var.project_name}-${var.environment}-instance-profile"
   role = aws_iam_role.ml_ec2.name

@@ -13,10 +13,13 @@ resource "aws_ebs_volume" "data" {
   }
 }
 
-# Linux에서 /dev/sdf로 요청하더라도 Nitro 계열 인스턴스에서는 실제로 NVMe 장치명으로 보일 수 있다.
-# bootstrap script가 EBS Volume ID를 기준으로 실제 장치를 찾아 /workspace에 마운트한다.
+# Linux에서 /dev/sdf로 요청해도 Nitro 계열에서는 실제 /dev/nvme*n1로 보인다.
+# bootstrap script는 EBS Volume ID의 NVMe serial을 사용해 실제 장치를 찾는다.
 resource "aws_volume_attachment" "data" {
   device_name = "/dev/sdf"
   volume_id   = aws_ebs_volume.data.id
   instance_id = aws_instance.ml.id
+
+  # 향후 EC2 교체 시 데이터 손상 위험을 낮추기 위해 정상 stop 후 detach한다.
+  stop_instance_before_detaching = true
 }

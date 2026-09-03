@@ -1,22 +1,35 @@
 # CAL 3D Printing Deep Learning - AWS Terraform 환경
 
-CAL(Computed Axial Lithography) projection enhancement 프로젝트를 위한 **GPU EC2 + S3 + EBS + JupyterLab 개발환경 자동 구축** 예제입니다.
+CAL(Computed Axial Lithography) projection enhancement 프로젝트용 **GPU EC2 + S3 + EBS + SSM + JupyterLab** 자동 구축 프로젝트입니다.
 
-## Terraform이 자동으로 만드는 것
+이 최종본은 프로젝트 구조를 다음 한 가지 기준으로 통일했습니다.
 
 ```text
+cal-ml-aws/
+├── infra/                    # Terraform은 항상 여기
+├── templates/                # EC2 early user_data + 전체 bootstrap
+├── project-template/         # Jupyter 프로젝트 초기 파일
+├── local-tools/              # 접속/Start/Stop/검증 스크립트
+├── deploy.ps1                # Windows 원클릭 배포
+├── deploy.sh                 # Linux/macOS 원클릭 배포
+├── Makefile
+├── REVIEW_NOTES.md
+└── TROUBLESHOOTING.md
+```
+
+## 최종 아키텍처
+
+```text
+Local PC
+  │
+  │ Terraform
+  ▼
 AWS
-├── VPC
-│   └── Public Subnet
-│       └── EC2 g6.2xlarge
-│           ├── AWS GPU DLAMI (Ubuntu 24.04)
-│           ├── NVIDIA Driver / CUDA (DLAMI 제공)
-│           ├── Root EBS 100GiB
-│           ├── Data EBS 300GiB -> /workspace
-│           ├── Local NVMe -> /workspace/cache (가능한 경우)
-│           ├── Python venv -> /workspace/venv
-│           ├── PyTorch + JupyterLab + 과학계산 패키지
-│           └── Jupyter systemd service (127.0.0.1:8888)
+├── VPC / Public Subnet / Internet Gateway
+│
+├── IAM Role + Instance Profile
+│   ├── AmazonSSMManagedInstanceCore
+│   └── Project S3 Read/Write
 │
 ├── S3
 │   ├── raw/
@@ -27,21 +40,40 @@ AWS
 │   ├── outputs/
 │   └── bootstrap/project-template/
 │
-├── IAM
-│   ├── SSM Session Manager
-│   └── 프로젝트 S3 Bucket Read/Write
+├── Data EBS gp3 300 GiB
+│         │
+│         ▼
+│   /workspace
 │
-└── AWS Budget (budget_email 설정 시 선택 생성)
+└── EC2 g6.2xlarge
+    ├── Ubuntu 24.04 GPU DLAMI
+    ├── NVIDIA L4 GPU
+    ├── SSM Agent
+    ├── Local NVMe -> /workspace/cache
+    └── JupyterLab -> 127.0.0.1:8888
 ```
 
-## 중요한 설계 원칙
+## 왜 bootstrap을 SSM Association으로 변경했나
 
-1. **Jupyter 8888 포트를 인터넷에 열지 않습니다.**
-2. 접속은 기본적으로 **AWS Systems Manager Session Manager**를 사용합니다.
-3. 코드/Notebook/checkpoint는 별도 EBS `/workspace`에 보존합니다.
-4. 빠른 Local NVMe는 cache/temp에만 사용합니다.
-5. 원본/가공 데이터와 최종 checkpoint는 S3를 Source of Truth로 사용합니다.
-6. EC2는 학습할 때만 Start하고 사용 후 Stop하여 GPU 비용을 줄입니다.
+기존 방식은 EC2 `user_data`가 Data EBS attach와 동시에 실행되었습니다. Terraform 입장에서는 EC2 생성과 EBS attachment가 별도 리소스이므로, OS 내부 설치 시점과 EBS attach 시점 사이에 race가 생길 수 있습니다. 또한 Terraform `apply`가 끝나도 pip/Jupyter 설치가 계속 진행 중이거나 실패했는지 알 수 없었습니다.
+
+최종본은 다음 순서입니다.
+
+```text
+1. VPC / IAM / S3 / EBS 생성
+2. EC2 생성 + Instance Profile 연결
+3. user_data가 SSM Agent를 즉시 시작
+4. Data EBS attach
+5. SSM State Manager Association 실행
+6. /workspace mount
+7. S3 project-template download
+8. Python venv / PyTorch / Jupyter 설치
+9. NVIDIA / CUDA / S3 / Jupyter smoke test
+10. Association Success
+11. terraform apply 완료
+```
+
+즉 **`terraform apply` 성공 = bootstrap Association도 성공**을 목표로 구성했습니다.
 
 ---
 
@@ -49,114 +81,129 @@ AWS
 
 필요 도구:
 
-- Terraform
-- AWS CLI
+- Terraform >= 1.7
+- AWS CLI v2
 - AWS Session Manager Plugin
-- AWS 계정 Credentials
+- AWS Credentials
 
-AWS CLI 확인:
+먼저 AWS 인증을 확인합니다.
 
-```bash
+```powershell
 aws sts get-caller-identity
 ```
 
 ---
 
-# 2. 변수 파일 생성
-
-Linux/macOS:
-
-```bash
-cp terraform.tfvars.example terraform.tfvars
-```
+# 2. 변수 파일 준비
 
 Windows PowerShell:
 
 ```powershell
-Copy-Item terraform.tfvars.example terraform.tfvars
+Copy-Item .\infra\terraform.tfvars.example .\infra\terraform.tfvars
 ```
-
-기본값은 `g6.2xlarge`, Root 100GiB, Data EBS 300GiB입니다.
-
-비용 알림을 사용하려면 `terraform.tfvars`에 추가합니다.
-
-```hcl
-budget_email       = "student@example.com"
-monthly_budget_usd = 250
-```
-
----
-
-# 3. 인프라 생성
-
-```bash
-terraform init
-terraform fmt -recursive
-terraform validate
-terraform plan
-terraform apply
-```
-
-적용 후:
-
-```bash
-terraform output
-```
-
-> AWS 계정의 G 계열 On-Demand vCPU quota가 부족하면 EC2 생성이 실패할 수 있습니다. 이 경우 Service Quotas에서 G 인스턴스 quota를 먼저 확인합니다.
-
----
-
-# 4. Bootstrap 완료 확인
-
-Terraform의 EC2 생성 완료와 OS 내부 패키지 설치 완료 시점은 다를 수 있습니다.
-SSM으로 접속한 뒤 cloud-init 상태를 확인합니다.
-
-```bash
-cloud-init status --wait
-sudo tail -n 200 /var/log/cal-bootstrap.log
-cat /workspace/bootstrap-status.txt
-```
-
-정상 완료 후 주요 경로:
-
-```text
-/workspace/
-├── cal-project/       # 코드 / Notebook / checkpoint
-├── venv/              # Python 가상환경
-└── cache -> NVMe      # 가능하면 Local NVMe 사용
-```
-
----
-
-# 5. EC2 Terminal 접속
-
-Terraform output에 접속 명령이 제공됩니다.
-
-```bash
-terraform output -raw ssm_session_command
-```
-
-또는:
 
 Linux/macOS:
 
 ```bash
-./local-tools/start-ssm.sh
+cp infra/terraform.tfvars.example infra/terraform.tfvars
 ```
+
+기본 구성은 다음과 같습니다.
+
+```hcl
+instance_type    = "g6.2xlarge"
+root_volume_size = 100
+data_volume_size = 300
+enable_ssh        = false
+```
+
+현재 사용 중인 `dev` 환경과 충돌 없이 새 구성으로 테스트하려면 임시로:
+
+```hcl
+environment = "dev2"
+```
+
+처럼 별도 환경 이름을 쓰는 것이 가장 안전합니다.
+
+---
+
+# 3. 가장 간단한 전체 배포
+
+## Windows
+
+프로젝트 루트에서:
+
+```powershell
+.\deploy.ps1
+```
+
+## Linux/macOS
+
+```bash
+./deploy.sh
+```
+
+스크립트가 다음을 순서대로 수행합니다.
+
+```text
+AWS 인증 확인
+→ terraform init
+→ terraform fmt
+→ terraform validate
+→ terraform plan
+→ 사용자 yes 확인
+→ terraform apply
+→ SSM bootstrap 성공까지 대기
+```
+
+---
+
+# 4. Terraform을 직접 실행하고 싶다면
+
+Terraform 파일은 모두 `infra/`에 있습니다.
+
+```powershell
+terraform -chdir=infra init
+terraform -chdir=infra fmt -recursive
+terraform -chdir=infra validate
+terraform -chdir=infra plan
+terraform -chdir=infra apply
+```
+
+**프로젝트 루트에서 `terraform state ...`를 직접 실행하지 않습니다.** 항상 `-chdir=infra`를 사용하거나 `infra` 디렉터리로 이동합니다.
+
+---
+
+# 5. 배포 완료 후 자동 검증
 
 Windows:
 
 ```powershell
-.\local-tools\start-ssm.ps1
+.\local-tools\verify-environment.ps1
+```
+
+Linux/macOS:
+
+```bash
+./local-tools/verify-environment.sh
+```
+
+다음을 한 번에 확인합니다.
+
+```text
+EC2 = running
+IAM Instance Profile = 실제 EC2에 연결
+SSM = Online
+Data EBS = attached
+Bootstrap Association = Success
 ```
 
 ---
 
 # 6. JupyterLab 접속
 
-Jupyter는 EC2의 `127.0.0.1:8888`에만 열려 있습니다.
-따라서 로컬 PC와 EC2 사이에 SSM Port Forwarding Tunnel을 만듭니다.
+Jupyter 8888은 Security Group에 공개하지 않습니다.
+EC2 내부 `127.0.0.1:8888`에만 listen하고 SSM Port Forwarding으로 접근합니다.
 
 Windows:
 
@@ -170,49 +217,77 @@ Linux/macOS:
 ./local-tools/start-jupyter-tunnel.sh
 ```
 
-Tunnel이 열린 상태에서 브라우저로 접속합니다.
+브라우저:
 
 ```text
 http://127.0.0.1:8888/lab
 ```
 
-Jupyter 자체의 token/password는 비활성화되어 있지만 **127.0.0.1에만 bind**되어 있고, 실제 사용자 인증은 AWS SSM 세션에서 수행됩니다.
-
 ---
 
-# 7. GPU 환경 확인
+# 7. EC2 Terminal 접속
 
-SSM Session Manager의 기본 shell 사용자는 환경에 따라 `ssm-user`일 수 있습니다.
-프로젝트 개발은 `ubuntu` 사용자로 전환한 뒤 진행하는 것을 권장합니다.
+Windows:
+
+```powershell
+.\local-tools\start-ssm.ps1
+```
+
+Linux/macOS:
+
+```bash
+./local-tools/start-ssm.sh
+```
+
+접속 후 Ubuntu 개발 사용자로 전환합니다.
 
 ```bash
 sudo -iu ubuntu
 ```
 
-그다음:
+환경 확인:
 
 ```bash
 cd /workspace/cal-project
 source /workspace/venv/bin/activate
-
-nvidia-smi
-python scripts/gpu_check.py
+./scripts/system_check.sh
 python scripts/smoke_train.py
+```
+
+Bootstrap 결과:
+
+```bash
+cat /workspace/bootstrap-status.txt
+cat /workspace/bootstrap-success
+```
+
+로그:
+
+```bash
+sudo tail -n 300 /var/log/cal-bootstrap.log
 ```
 
 ---
 
-# 8. S3 데이터 사용
+# 8. 데이터 저장 원칙
 
-환경 변수는 bootstrap에서 자동 등록합니다.
+| 데이터 | 권장 위치 | 설명 |
+|---|---|---|
+| STL 원본 | S3 `raw/stl/` | 장기 보관 |
+| Voxel/Projection/Feature | S3 `processed/` | 재사용 가능한 가공 데이터 |
+| 학습 Dataset | S3 + `/workspace/cache` | S3 원본, NVMe 학습 cache |
+| Notebook/Source | `/workspace/cal-project` | Data EBS에 보존 |
+| 임시 augmentation | `/workspace/cache` | Local NVMe 사용 |
+| Checkpoint | EBS + S3 `checkpoints/` | 중단 복구 |
+| 최종 모델/평가 결과 | S3 `outputs/` | 장기 보관 |
 
-```bash
-echo $CAL_S3_BUCKET
-echo $CAL_PROJECT_DIR
-echo $CAL_CACHE_DIR
-```
+`g6.2xlarge`의 Local NVMe는 빠르지만 Stop/Terminate 시 보존 대상으로 보면 안 됩니다.
 
-Train 데이터 내려받기:
+---
+
+# 9. S3 사용
+
+Train dataset 내려받기:
 
 ```bash
 cd /workspace/cal-project
@@ -225,92 +300,100 @@ Checkpoint 업로드:
 ./scripts/s3_sync_up.sh checkpoints checkpoints
 ```
 
----
-
-# 9. 데이터 저장 위치 권장
-
-| 데이터 | 위치 | 이유 |
-|---|---|---|
-| STL 원본 | S3 `raw/stl/` | 장기 보관 |
-| Voxel/Projection/Feature | S3 `processed/` | 재사용 데이터 |
-| 실제 학습 Dataset | S3 + `/workspace/cache` | S3 보관 + NVMe 학습 cache |
-| Notebook/Source | Data EBS `/workspace/cal-project` | Stop 후에도 보존 |
-| 임시 augmentation | `/workspace/cache` | 빠른 NVMe 활용 |
-| Checkpoint | EBS + S3 `checkpoints/` | 중단 복구 |
-| 최종 모델/평가 결과 | S3 `outputs/` | 장기 보관 |
+S3의 `raw/`, `datasets/` 같은 항목은 실제 디렉터리가 아니라 Object Key prefix입니다. 빈 folder marker 객체를 Terraform으로 만들지 않습니다.
 
 ---
 
-# 10. EC2 Start / Stop
+# 10. 비용 절감: EC2 Stop / Start
 
-GPU EC2 비용이 가장 크므로 학습할 때만 Start하고 끝났으면 **Terminate가 아니라 Stop** 합니다.
-
-Windows:
+작업 종료:
 
 ```powershell
-.\local-tools\start-ec2.ps1
 .\local-tools\stop-ec2.ps1
 ```
 
-Linux/macOS:
+다음 작업 시작:
 
-```bash
-./local-tools/start-ec2.sh
-./local-tools/stop-ec2.sh
+```powershell
+.\local-tools\start-ec2.ps1
 ```
 
-Stop 상태에서는 EC2 compute 요금은 발생하지 않지만 EBS/S3 저장비용은 계속 발생합니다.
-Local NVMe 데이터는 보존 대상으로 생각하지 말고 S3/EBS에 필요한 데이터를 먼저 저장해야 합니다.
+Start script는 EC2 `running`뿐 아니라 **SSM Online까지 기다립니다.**
+
+Stop 상태에서는 GPU compute 비용은 중단되지만 EBS/S3 저장 비용은 계속 발생합니다.
 
 ---
 
-# 11. 전체 삭제
+# 11. AMI 업데이트 정책
 
-S3에 데이터가 남아 있으면 안전을 위해 Bucket 삭제가 막힐 수 있습니다.
-프로젝트 데이터가 필요하면 먼저 백업합니다.
+최초 EC2 생성 시 AWS Public SSM Parameter의 최신 Ubuntu 24.04 GPU DLAMI를 사용합니다.
 
-```bash
-terraform destroy
+다만 AWS가 `latest` 값을 갱신할 때마다 기존 GPU 서버가 자동 교체되는 것은 학습 환경에서 위험하므로:
+
+```hcl
+lifecycle {
+  ignore_changes = [ami]
+}
 ```
 
-교육용으로 Bucket까지 강제 삭제하고 싶다면 `s3.tf`의 `force_destroy` 정책을 신중히 변경하십시오.
+를 적용했습니다.
+
+즉:
+
+- 최초 생성: 그 시점의 최신 DLAMI
+- 일반 `terraform apply`: 최신 AMI가 바뀌어도 기존 EC2 유지
+- EC2가 실제로 재생성돼야 할 때: 당시 최신 DLAMI 사용
 
 ---
 
-# 파일 구조
+# 12. 전체 삭제
+
+기본값:
+
+```hcl
+s3_force_destroy = false
+```
+
+이므로 S3에 학습 데이터/Version이 남으면 안전을 위해 Bucket 삭제가 막힐 수 있습니다.
+
+교육용 완전 삭제가 목적이라면 데이터가 필요 없는지 확인한 뒤:
+
+```hcl
+s3_force_destroy = true
+```
+
+로 변경해 `apply` 후 `destroy`할 수 있습니다.
+
+```powershell
+terraform -chdir=infra apply
+terraform -chdir=infra destroy
+```
+
+---
+
+# 주요 파일
 
 ```text
-cal-ml-complete/
-├── versions.tf
-├── provider.tf
-├── variables.tf
-├── locals.tf
-├── network.tf
-├── s3.tf
-├── iam.tf
-├── storage.tf
-├── ec2.tf
-├── budget.tf
-├── outputs.tf
-├── terraform.tfvars.example
-├── Makefile
-├── TROUBLESHOOTING.md
-├── templates/
-│   └── user_data.sh.tftpl
-├── project-template/
-│   ├── README.md
-│   ├── requirements.txt
-│   ├── configs/
-│   ├── notebooks/
-│   ├── scripts/
-│   └── src/
-└── local-tools/
-    ├── start-ec2.ps1
-    ├── start-ec2.sh
-    ├── stop-ec2.ps1
-    ├── stop-ec2.sh
-    ├── start-ssm.ps1
-    ├── start-ssm.sh
-    ├── start-jupyter-tunnel.ps1
-    └── start-jupyter-tunnel.sh
+infra/ec2.tf
+  EC2 + Instance Profile + early SSM user_data
+
+infra/storage.tf
+  영구 Data EBS + attachment
+
+infra/bootstrap.tf
+  EBS attach 이후 전체 개발환경을 설치하는 SSM Association
+
+infra/s3.tf
+  S3 Bucket + project-template upload
+
+templates/user_data.sh.tftpl
+  SSM Agent 조기 시작만 담당
+
+templates/bootstrap.sh.tftpl
+  EBS/Python/PyTorch/Jupyter/GPU smoke test 전체 자동화
+
+local-tools/verify-environment.*
+  실제 AWS 상태 검증
 ```
+
+자세한 수정 이유는 `REVIEW_NOTES.md`, 장애 진단은 `TROUBLESHOOTING.md`를 참고하세요.

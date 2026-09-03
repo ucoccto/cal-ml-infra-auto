@@ -33,8 +33,18 @@ output "data_ebs_volume_id" {
   value       = aws_ebs_volume.data.id
 }
 
+output "iam_instance_profile_name" {
+  description = "EC2에 연결된 IAM Instance Profile 이름"
+  value       = aws_iam_instance_profile.ml_ec2.name
+}
+
+output "bootstrap_association_id" {
+  description = "개발환경 자동 설치를 수행하는 SSM State Manager Association ID"
+  value       = aws_ssm_association.bootstrap.association_id
+}
+
 output "dlami_id" {
-  description = "AWS Public SSM Parameter에서 조회한 최신 GPU DLAMI ID"
+  description = "생성 시 선택된 최신 GPU DLAMI ID"
   value       = nonsensitive(data.aws_ssm_parameter.dlami_gpu.value)
 }
 
@@ -44,7 +54,7 @@ output "ssm_session_command" {
 }
 
 output "jupyter_tunnel_command_bash" {
-  description = "Linux/macOS에서 Jupyter 8888 포트를 로컬로 포워딩하는 명령"
+  description = "Linux/macOS에서 Jupyter 포트를 로컬로 포워딩하는 명령"
   value       = "aws ssm start-session --target ${aws_instance.ml.id} --region ${var.aws_region} --document-name AWS-StartPortForwardingSession --parameters '{\"portNumber\":[\"${var.jupyter_port}\"],\"localPortNumber\":[\"${var.jupyter_port}\"]}'"
 }
 
@@ -54,6 +64,11 @@ output "jupyter_url" {
 }
 
 output "bootstrap_log_command" {
-  description = "EC2 접속 후 Bootstrap 진행 로그 확인 명령"
-  value       = "sudo tail -f /var/log/cal-bootstrap.log"
+  description = "EC2 접속 후 전체 Bootstrap 로그 확인"
+  value       = "sudo tail -n 300 /var/log/cal-bootstrap.log"
+}
+
+output "bootstrap_status_command" {
+  description = "EC2 접속 후 Bootstrap 최종 결과 확인"
+  value       = "cat /workspace/bootstrap-status.txt"
 }

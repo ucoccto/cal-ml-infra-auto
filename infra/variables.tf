@@ -44,19 +44,19 @@ variable "public_subnet_cidr" {
 # EC2 / Storage
 # ------------------------------
 variable "instance_type" {
-  description = "GPU 학습용 EC2 유형. 기본값은 NVIDIA L4 24GB를 사용하는 g6.2xlarge"
+  description = "GPU 학습용 EC2 유형. 기본 g6.2xlarge = NVIDIA L4 24GB"
   type        = string
   default     = "g6.2xlarge"
 }
 
 variable "root_volume_size" {
-  description = "OS와 기본 도구가 저장되는 Root EBS(gp3) 용량, GiB"
+  description = "OS/기본 도구용 Root EBS(gp3) 용량, GiB"
   type        = number
   default     = 100
 }
 
 variable "data_volume_size" {
-  description = "프로젝트 코드/노트북/checkpoint를 저장하는 Data EBS(gp3) 용량, GiB"
+  description = "코드/Notebook/checkpoint용 Data EBS(gp3) 용량, GiB"
   type        = number
   default     = 300
 }
@@ -74,16 +74,25 @@ variable "data_volume_throughput" {
 }
 
 # ------------------------------
+# S3
+# ------------------------------
+variable "s3_force_destroy" {
+  description = "true면 terraform destroy 시 Version을 포함한 S3 객체도 함께 삭제. 기본 false는 학습 데이터 보호"
+  type        = bool
+  default     = false
+}
+
+# ------------------------------
 # 접속 방식
 # ------------------------------
 variable "enable_ssh" {
-  description = "SSH 22번 포트를 열지 여부. 기본은 false이며 SSM 접속을 권장"
+  description = "SSH 22번 포트를 열지 여부. 기본 false, SSM 접속 권장"
   type        = bool
   default     = false
 }
 
 variable "ssh_allowed_cidr" {
-  description = "SSH를 사용할 때 허용할 공인 IP CIDR. 0.0.0.0/0 사용 금지 권장"
+  description = "SSH 사용 시 허용할 공인 IP CIDR"
   type        = string
   default     = "127.0.0.1/32"
 }
@@ -99,28 +108,39 @@ variable "key_name" {
 # 개발환경 Bootstrap
 # ------------------------------
 variable "jupyter_port" {
-  description = "EC2 내부 JupyterLab 포트. 외부 공개하지 않고 SSM tunnel로 접근"
+  description = "EC2 내부 JupyterLab 포트. 외부 공개 없이 SSM tunnel로 접근"
   type        = number
   default     = 8888
 }
 
 variable "install_ml_packages" {
-  description = "EC2 최초 부팅 시 requirements.txt의 ML/Python 패키지를 자동 설치할지 여부"
+  description = "requirements.txt의 ML/Python 패키지를 자동 설치할지 여부"
   type        = bool
   default     = true
+}
+
+variable "bootstrap_timeout_seconds" {
+  description = "SSM bootstrap 최대 실행/대기 시간. torch 설치 등을 고려해 기본 2시간"
+  type        = number
+  default     = 7200
+
+  validation {
+    condition     = var.bootstrap_timeout_seconds >= 600 && var.bootstrap_timeout_seconds <= 28800
+    error_message = "bootstrap_timeout_seconds는 600~28800초 사이로 지정하세요."
+  }
 }
 
 # ------------------------------
 # 비용 알림 (선택)
 # ------------------------------
 variable "budget_email" {
-  description = "AWS Budget 알림을 받을 이메일. 빈 문자열이면 Budget 리소스를 만들지 않음"
+  description = "AWS Budget 알림 이메일. 빈 문자열이면 Budget 미생성"
   type        = string
   default     = ""
 }
 
 variable "monthly_budget_usd" {
-  description = "월 비용 알림 기준(USD). 30~40만원 예산이면 환율에 맞게 조정"
+  description = "월 비용 알림 기준(USD)"
   type        = number
   default     = 250
 }

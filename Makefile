@@ -1,23 +1,30 @@
-# Linux/macOS에서 자주 쓰는 Terraform 명령을 단순화한다.
-.PHONY: init fmt validate plan apply output destroy
+TF = terraform -chdir=infra
+
+.PHONY: init fmt validate plan apply output destroy deploy verify
 
 init:
-	terraform init
+	$(TF) init
 
 fmt:
-	terraform fmt -recursive
+	$(TF) fmt -recursive
 
 validate:
-	terraform validate
+	$(TF) validate
 
 plan:
-	terraform plan
+	$(TF) plan
 
 apply:
-	terraform apply
+	$(TF) apply
 
 output:
-	terraform output
+	$(TF) output
 
 destroy:
-	terraform destroy
+	$(TF) destroy
+
+deploy:
+	./deploy.sh
+
+verify:
+	./local-tools/verify-environment.sh

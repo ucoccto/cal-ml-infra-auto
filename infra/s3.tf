@@ -1,17 +1,20 @@
-# 원본/가공 데이터, checkpoint, 최종 결과를 장기 보관할 S3 Bucket이다.
-resource "aws_s3_bucket" "data" {
-  bucket = local.bucket_name
+# ============================================================
+# S3
+# - 원본/가공 데이터
+# - Dataset
+# - Checkpoint / Output
+# - EC2 초기화용 project-template
+# ============================================================
 
-  # 실습 종료 후 terraform destroy만으로 데이터를 삭제하고 싶다면 true로 바꿀 수 있다.
-  # 기본 false는 실수로 학습 데이터를 삭제하는 것을 방지한다.
-  force_destroy = false
+resource "aws_s3_bucket" "data" {
+  bucket        = local.bucket_name
+  force_destroy = var.s3_force_destroy
 
   tags = {
     Name = local.bucket_name
   }
 }
 
-# 외부 공개를 전면 차단한다.
 resource "aws_s3_bucket_public_access_block" "data" {
   bucket = aws_s3_bucket.data.id
 
@@ -21,7 +24,6 @@ resource "aws_s3_bucket_public_access_block" "data" {
   restrict_public_buckets = true
 }
 
-# S3 저장 객체를 서버 측 암호화한다.
 resource "aws_s3_bucket_server_side_encryption_configuration" "data" {
   bucket = aws_s3_bucket.data.id
 
@@ -32,7 +34,6 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "data" {
   }
 }
 
-# 실수로 파일을 덮어써도 복구 가능하도록 Versioning을 켠다.
 resource "aws_s3_bucket_versioning" "data" {
   bucket = aws_s3_bucket.data.id
 
@@ -41,44 +42,44 @@ resource "aws_s3_bucket_versioning" "data" {
   }
 }
 
-# 논리적 데이터 영역을 미리 생성한다.
-resource "aws_s3_object" "folders" {
-  for_each = toset([
-    "raw/",
-    "raw/stl/",
-    "processed/",
-    "processed/voxel/",
-    "processed/projection/",
-    "processed/gradient/",
-    "processed/curvature/",
-    "processed/levelset/",
-    "processed/geometry/",
-    "augmented/",
-    "datasets/",
-    "datasets/train/",
-    "datasets/validation/",
-    "datasets/test/",
-    "checkpoints/",
-    "outputs/",
-    "bootstrap/"
-  ])
+# S3는 실제 디렉터리가 아니라 Object Key prefix를 사용하므로
+# raw/, datasets/ 같은 빈 folder marker 객체는 만들지 않는다.
+# 실제 데이터가 올라오면 prefix가 자연스럽게 S3 Console에서 폴더처럼 보인다.
 
-  bucket  = aws_s3_bucket.data.id
-  key     = each.value
-  content = ""
-}
-
-# 로컬 project-template 디렉터리의 파일들을 S3에 업로드한다.
-# EC2 user_data가 이 위치를 내려받아 Jupyter 프로젝트를 자동으로 만든다.
+# 프로젝트 루트의 project-template 파일들을 S3 bootstrap 영역에 업로드한다.
 resource "aws_s3_object" "project_template" {
   for_each = local.project_template_files
 
   bucket = aws_s3_bucket.data.id
   key    = "bootstrap/project-template/${each.value}"
-  source = "${path.module}/project-template/${each.value}"
+  source = "${local.project_template_dir}/${each.value}"
 
-  # 로컬 파일이 바뀌면 Terraform이 변경을 감지하도록 한다.
-  etag = filemd5("${path.module}/project-template/${each.value}")
+  # 로컬 파일 내용 변경을 Terraform이 확실히 감지한다.
+  source_hash = filemd5("${local.project_template_dir}/${each.value}")
 
-  depends_on = [aws_s3_bucket_versioning.data]
+  depends_on = [
+    aws_s3_bucket_public_access_block.data,
+    aws_s3_bucket_server_side_encryption_configuration.data,
+    aws_s3_bucket_versioning.data
+  ]
+}
+
+# EC2 전체 설치 스크립트는 Terraform에서 실제 리소스 값(S3/EBS 등)을
+# 렌더링한 뒤 S3에 저장한다. State Manager는 AWS-RunRemoteScript로
+# 이 파일을 내려받아 실행하므로 긴 shell script를 Association parameter에
+# 직접 넣지 않는다.
+resource "aws_s3_object" "bootstrap_script" {
+  bucket  = aws_s3_bucket.data.id
+  key     = local.bootstrap_object_key
+  content = local.bootstrap_script
+
+  # bootstrap template/변수가 바뀌면 객체와 Association이 함께 갱신된다.
+  source_hash  = sha256(local.bootstrap_script)
+  content_type = "text/x-shellscript"
+
+  depends_on = [
+    aws_s3_bucket_public_access_block.data,
+    aws_s3_bucket_server_side_encryption_configuration.data,
+    aws_s3_bucket_versioning.data
+  ]
 }

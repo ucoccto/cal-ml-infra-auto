@@ -1,10 +1,14 @@
-# Terraform local state / provider cache
+# Terraform local state / cache
 .terraform/
 *.tfstate
 *.tfstate.*
-.terraform.lock.hcl
+*.tfplan
+crash.log
+crash.*.log
 
-# 실제 계정/이메일/IP 등 로컬 변수는 Git에 올리지 않는다.
+# .terraform.lock.hcl은 Provider 재현성을 위해 Git에 커밋하는 것을 권장한다.
+
+# 실제 계정/이메일/IP 등 로컬 변수
 terraform.tfvars
 *.auto.tfvars
 
